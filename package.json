@@ -1,0 +1,26 @@
+{
+  "name": "@jvavscratch/cli",
+  "version": "1.0.0",
+  "description": "Jvavscratch 命令行工具",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "jvavscratch": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "dependencies": {
+    "@jvavscratch/core": "^1.0.3",
+    "@jvavscratch/generator": "^1.0.3",
+    "@jvavscratch/utils": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
