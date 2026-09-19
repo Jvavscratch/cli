@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 编译产物
+dist/
+*.tsbuildinfo
+
+# 测试覆盖率
+coverage/
+
+# 杂项
+*.log
+.DS_Store

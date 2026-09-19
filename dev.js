@@ -1,5 +1,3 @@
-﻿#!/usr/bin/env node
-
 /*******************************************************************
 * Copyright         : 2024 saaawdust
 * File Name         : index.js
@@ -17,9 +15,9 @@ const { register } = require('ts-node');
 
 function init(filePath)
 {
-    register({ project: join(__dirname, "tsconfig.json"), transpileOnly: true });
+    register({ project: join(__dirname, "tsconfig.json"), transpileOnly: true, compilerOptions: { ignoreDeprecations: "6.0" } });
     const result = require(filePath);
     return result.default || result;
 }
 
-init('./boot.ts');
+init(join(__dirname, 'src', 'boot.ts'));

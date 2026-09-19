@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // 导入项目启动模块
 import './boot';
 

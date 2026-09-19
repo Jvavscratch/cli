@@ -2,25 +2,39 @@
   "name": "@jvavscratch/cli",
   "version": "1.0.0",
   "description": "Jvavscratch 命令行工具",
+  "license": "MPL-2.0",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
     "jvavscratch": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "assets",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
-    "watch": "tsc -w"
+    "watch": "tsc -w",
+    "dev": "node dev.js",
+    "prepare": "tsc"
   },
   "dependencies": {
-    "@jvavscratch/core": "^1.0.3",
-    "@jvavscratch/generator": "^1.0.3",
-    "@jvavscratch/utils": "^1.0.3"
+    "@iarna/toml": "^2.2.5",
+    "@jvavscratch/core": "github:Jvavscratch/core",
+    "@jvavscratch/decompiler": "github:Jvavscratch/decompiler",
+    "@jvavscratch/generator": "github:Jvavscratch/generator",
+    "@jvavscratch/types": "github:Jvavscratch/types",
+    "@jvavscratch/utils": "github:Jvavscratch/utils",
+    "chalk": "^4.1.2",
+    "tar": "^7.4.3",
+    "yargs": "^17.7.2"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "^20.11.0",
+    "@types/yargs": "^17.0.32",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   }
 }

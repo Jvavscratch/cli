@@ -1,22 +1,21 @@
-﻿/*******************************************************************
+/*******************************************************************
 * Copyright         : 2024 saaawdust
 * File Name         : boot.ts
 * Description       : Bootstraps the jvavscratch environment
-*                    
-* Revision History  :
-* Date		Author 			Comments
-* ------------------------------------------------------------------
-* 13/09/2024	saaawdust	Created file, setup environment
 *
+* Revision History  :
+* Date        Author          Comments
+* ------------------------------------------------------------------
+* 10/12/2025  NeuronPulse     Modified
 /******************************************************************/
 
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { addDep, buildProject, createPackage, createProject, decompileFromSB3, removeDep, runProject, updateDep } from "./cli/projectManager";
+import { addDep, buildProject, createPackage, createProject, decompileFromSB3, removeDep, runProject, updateDep, publishPackage, searchPackages, ProjectError } from "./cli/projectManager";
+import { login, register } from "./cli/registry";
+import { setApiToken, setRegistryUrl, getRegistryUrl, clearAuth, setConfig } from "./cli/config";
 import { cwd } from "process";
 import { basename, join, resolve } from "path";
-// import { error } from "./cli/jvavscratchProject"; // 替换为自定义错误处理
-const error = console.error;
 import chalk from 'chalk';
 import { existsSync } from 'fs';
 
@@ -33,8 +32,25 @@ function parseStrings(...args: any) {
     });
 }
 
+function handleCommand(handler: (argv: any) => Promise<void> | void) {
+    return async (argv: any) => {
+        try {
+            await handler(argv);
+        } catch (e) {
+            if (e instanceof ProjectError) {
+                console.error(chalk.red("error: ") + e.message);
+            } else if (e instanceof Error) {
+                console.error(chalk.red("error: ") + e.message);
+            } else {
+                console.error(chalk.red("error: "), e);
+            }
+            process.exit(1);
+        }
+    };
+}
+
 yargs(hideBin(process.argv))
-    .scriptName("node src/index.js")
+    .scriptName("jvavscratch")
     .usage('$0 <cmd> [args]')
 
     .command(
@@ -53,23 +69,19 @@ yargs(hideBin(process.argv))
                     describe: 'The path to create the project'
                 });
         },
-        (argv) => {
-            if (process.platform != "win32" && !argv.bypass) error("node src/index.js only works on the windows architecture.");
-
+        handleCommand((argv) => {
             return createProject(argv.name, argv.path);
-        }
+        })
     )
 
     .command(
         'init',
         'Creates a new project in the current-working-directory',
         () => { },
-        (argv) => {
-            if (process.platform != "win32" && !argv.bypass) error("node src/index.js only works on the windows architecture.");
-
+        handleCommand((argv) => {
             let wd = cwd();
             return createProject(basename(wd), ".");
-        }
+        })
     )
 
     .command(
@@ -82,12 +94,10 @@ yargs(hideBin(process.argv))
                 describe: 'Path to the `jvavscratch` project'
             });
         },
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) error("node src/index.js only works on the windows architecture.");
-
+        handleCommand(async (argv) => {
             let resolved = resolve(argv.path);
             return await buildProject(argv, resolved, basename(resolved));
-        }
+        })
     )
 
     .command(
@@ -100,11 +110,16 @@ yargs(hideBin(process.argv))
                 describe: 'Path to the `jvavscratch` project'
             });
         },
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) error("node src/index.js only works on the windows architecture.");
+        handleCommand(async (argv) => {
+            if (process.platform != "win32" && !argv.bypass) {
+                console.error("The `run` command automatically opens TurboWarp, which is only pre-configured for Windows.");
+                console.error("Use `jvavscratch build` to compile the project, then open the .sb3 manually.");
+                console.error("Or use --bypass if you have TurboWarp installed elsewhere.");
+                return;
+            }
             let resolved = resolve(argv.path);
             return await runProject(argv, resolved, basename(resolved));
-        }
+        })
     )
     .command(
         'decompile <sb3Path> [outputDir] [projectName]',
@@ -125,18 +140,13 @@ yargs(hideBin(process.argv))
                     describe: 'Name for the decompiled project (optional)'
                 });
         },
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) {
-                console.error("node src/index.js only works on the windows architecture.");
+        handleCommand(async (argv) => {
+            if (!argv.sb3Path) {
+                console.error("error: 请提供SB3文件路径");
                 return;
             }
-            
-            try {
-                await decompileFromSB3(argv.sb3Path, argv.outputDir, argv.projectName);
-            } catch (error) {
-                console.error("反编译失败:", error);
-            }
-        }
+            await decompileFromSB3(argv.sb3Path, argv.outputDir, argv.projectName);
+        })
     )
 
     .command(
@@ -155,11 +165,9 @@ yargs(hideBin(process.argv))
                     describe: 'The path to create the package'
                 });
         },
-        (argv) => {
-            if (process.platform != "win32" && !argv.bypass) error("node src/index.js only works on the windows architecture.");
-
+        handleCommand((argv) => {
             return createPackage(argv.name, argv.path);
-        }
+        })
     )
     .command(
         'add [libs...]',
@@ -172,15 +180,10 @@ yargs(hideBin(process.argv))
                     array: true
                 });
         },
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) {
-                console.error("node src/index.js only works on the windows architecture.");
-                return;
-            }
-
+        handleCommand(async (argv) => {
             const parsedLibs = parseStrings(...(argv.libs as any));
             await addDep(parsedLibs);
-        }
+        })
     )
 
     .command(
@@ -194,67 +197,157 @@ yargs(hideBin(process.argv))
                     array: true
                 });
         },
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) {
-                console.error("jvavscratch only works on the windows architecture.");
-                return;
-            }
-
+        handleCommand(async (argv) => {
             let libs = argv.libs;
             let libsFolder = join(cwd(), "lib");
 
             if (!existsSync(libsFolder)) {
-                error("there are no dependencies to remove");
+                console.error(chalk.red("error: ") + "there are no dependencies to remove");
+                return;
             };
 
             return removeDep(libsFolder, (libs as any));
-        }
+        })
     )
 
     .command(
           'update',
          'Updates dependencies in the project.\n',
         (yargs) => {},
-        async (argv) => {
-            if (process.platform != "win32" && !argv.bypass) {
-                console.error("jvavscratch only works on the windows architecture.");
-                return;
-            }
-
-            let libs = argv.libs;
+        handleCommand(async (argv) => {
             let libsFolder = join(cwd(), "lib");
 
             if (!existsSync(libsFolder)) {
-                error("there are no dependencies to remove");
+                console.error(chalk.red("error: ") + "there are no dependencies to update");
+                return;
             };
 
             if (!existsSync(join(cwd(), "jvavscratch.toml"))) {
-        error("no 'jvavscratch.toml' could be found");
-        return;
-    }
-    
-    return updateDep(libsFolder, join(cwd(), "jvavscratch.toml"));
-        }
+                console.error(chalk.red("error: ") + "no 'jvavscratch.toml' could be found");
+                return;
+            }
+
+            return updateDep(libsFolder, join(cwd(), "jvavscratch.toml"));
+        })
+    )
+
+    .command(
+        'search <query>',
+        'Search for packages in the registry.',
+        (yargs) => {
+            return yargs.positional('query', {
+                type: 'string',
+                describe: 'Search query'
+            });
+        },
+        handleCommand(async (argv) => {
+            await searchPackages(argv.query);
+        })
     )
 
     .command(
         'publish',
-        'Returns information on publishing a package.',
-        (yargs) => { },
-        (argv) => {
-            // Format with links
-            console.log(chalk.blue("[INFO]") +
-                ": To publish a package; you need to submit a pull request "+
-                "\u001b]8;;https://github.com/jvavscratch/jvavscratch-registry/pulls\u001b\\here\u001b]8;;\u001b\\" +
-                ". More about publishing can be found " +
-                "\u001b]8;;https://github.com/jvavscratch/jvavscratch-registry/blob/main/README.md\u001b\\here\u001b]8;;\u001b\\!");
-        }
+        'Publishes the current package to the registry.',
+        (yargs) => {},
+        handleCommand(async (argv) => {
+            await publishPackage();
+        })
+    )
+
+    .command(
+        'login',
+        'Log in to the jvavscratch registry.',
+        (yargs) => {},
+        handleCommand(async (argv) => {
+            const readline = require('readline');
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+            const question = (prompt: string): Promise<string> => new Promise(resolve => rl.question(prompt, resolve));
+
+            console.log(chalk.blue("[INFO]") + ` Logging in to ${getRegistryUrl()}`);
+            const username = await question('Username: ');
+            const password = await question('Password: ');
+            rl.close();
+
+            const result = await login(username, password);
+            setApiToken(result.api_token);
+            setConfig({ username });
+            console.log(chalk.green("[OK]") + " Logged in successfully.");
+        })
+    )
+
+    .command(
+        'register',
+        'Register a new account on the jvavscratch registry.',
+        (yargs) => {},
+        handleCommand(async (argv) => {
+            const readline = require('readline');
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+            const question = (prompt: string): Promise<string> => new Promise(resolve => rl.question(prompt, resolve));
+
+            console.log(chalk.blue("[INFO]") + ` Registering on ${getRegistryUrl()}`);
+            const username = await question('Username: ');
+            const email = await question('Email: ');
+            const password = await question('Password: ');
+            rl.close();
+
+            const result = await register(username, email, password);
+            setApiToken(result.api_token);
+            setConfig({ username });
+            console.log(chalk.green("[OK]") + " Account created and logged in successfully.");
+        })
+    )
+
+    .command(
+        'registry <subcommand> [value]',
+        'Manage registry settings.',
+        (yargs) => {
+            return yargs
+                .positional('subcommand', {
+                    type: 'string',
+                    describe: 'set-url, get-url, set-token, or logout'
+                })
+                .positional('value', {
+                    type: 'string',
+                    describe: 'Value for set-url or set-token'
+                });
+        },
+        handleCommand(async (argv) => {
+            switch (argv.subcommand) {
+                case 'set-url':
+                    if (!argv.value) {
+                        console.error(chalk.red("error: ") + "URL is required");
+                        return;
+                    }
+                    setRegistryUrl(argv.value);
+                    console.log(chalk.green("[OK]") + ` Registry URL set to ${argv.value}`);
+                    break;
+                case 'get-url':
+                    console.log(getRegistryUrl());
+                    break;
+                case 'set-token':
+                    if (!argv.value) {
+                        console.error(chalk.red("error: ") + "Token is required");
+                        return;
+                    }
+                    setApiToken(argv.value);
+                    console.log(chalk.green("[OK]") + " API token set");
+                    break;
+                case 'logout':
+                    clearAuth();
+                    console.log(chalk.green("[OK]") + " Logged out");
+                    break;
+                default:
+                    console.error(chalk.red("error: ") + "Unknown subcommand. Use: set-url, get-url, set-token, logout");
+            }
+        })
     )
 
     .option('bypass', {
         alias: 'b',
         type: 'boolean',
-        description: 'Bypass the platform-block on jvavscratch. May cause errors.'
+        description: 'Bypass the TurboWarp platform check on `run`. May cause errors.'
     })
 
     .option('optimize', {

@@ -1,30 +1,35 @@
-﻿/*******************************************************************
-* Copyright         : 2024 NeuronPulse
+/*******************************************************************
+* Copyright         : 2024 saaawdust
 * File Name         : projectManager.ts
 * Description       : Manages jvavscratch projects
 *                    
 * Revision History  :
-* Date		Author 		Comments
+* Date        Author          Comments
 * ------------------------------------------------------------------
-\n* 11/27/2025\tNeuronPulse\tModified\n* * Current	NeuronPulse	Refactored to jvavscratch
-*
+* 10/12/2025  NeuronPulse     Modified
 /******************************************************************/
 
 import { cwd } from "process";
-import { DirectoryBuffer, FileBuffer } from "../util/fs";
+import { DirectoryBuffer, FileBuffer } from "@jvavscratch/utils";
 import path, { basename, join, resolve } from "path";
 import chalk from "chalk";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { createFileTree } from "./treeScan";
-import { Block, Costume, Project, Sound, Sprite } from "../util/types";
-import { cloneFolderSync, copyAllSync, createCostume, createSound, createSprite, deleteAllContents, fillDefaults, zipFolderToSb3 } from "../util/build-util";
-import { parseProgram } from "../env/parseProgram";
-import { userInfo } from "os";
+import { Block, Costume, Project, Sound, Sprite } from "@jvavscratch/types";
+import { cloneFolderSync, copyAllSync, createCostume, createSound, createSprite, deleteAllContents, fillDefaults, zipFolderToSb3 } from "@jvavscratch/utils";
+import { getBuildScratchDir, parseProgram, scratchFile, setBuildScratchDir } from "@jvavscratch/core";
+import { tmpdir, userInfo } from "os";
 import { execFileSync } from "child_process";
 import * as toml from "@iarna/toml";
-import { treeOptimise } from "../packages/tree-optimise/index"
-import { Warn } from "../util/err";
-import { unzipSB3, createjvavscratchProject } from "../util/decompile-util";
+// 必须从包**主入口**导入,不能写 "@jvavscratch/generator/optimise":
+// 主入口的副作用就是把全部 42 个生成器注册进 core 的派发表,只引子路径
+// 不会执行注册,运行时会因派发表为空而几乎什么都不生成。
+import { treeOptimise } from "@jvavscratch/generator"
+// import { Warn } from "@jvavscratch/core"; // Using local warn function instead
+import { unzipSB3, createjvavscratchProject } from "@jvavscratch/decompiler";
+import { downloadCrate, getCrate, publishCrate, searchCrates } from "./registry";
+import { getApiToken, setApiToken, setConfig, getRegistryUrl } from "./config";
+import * as tar from "tar";
 
 // Project configuration file path
 const bt = join(cwd(), "jvavscratch.toml");
@@ -113,14 +118,20 @@ version = "0.0.1"
     ]).Instantiate(in_folder);
 
     new DirectoryBuffer("utils").Append([
-        new FileBuffer("internal.ts", readFileSync(join(__dirname, "../assets/internal.txt")).toString()),
-        new FileBuffer("library.ts", readFileSync(join(__dirname, "../assets/library.txt")).toString()),
+        new FileBuffer("internal.ts", readFileSync(join(__dirname, "../../assets/internal.txt")).toString()),
+        new FileBuffer("library.ts", readFileSync(join(__dirname, "../../assets/library.txt")).toString()),
     ]).Instantiate(in_folder);
 }
 
-export function error(string: string) {
-    console.error(chalk.red("error: ") + string);
-    process.exit(1);
+export class ProjectError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "ProjectError";
+    }
+}
+
+export function error(string: string): never {
+    throw new ProjectError(string);
 }
 
 async function downloadGit(link: string): Promise<any> {
@@ -140,7 +151,7 @@ async function downloadGit(link: string): Promise<any> {
     return tree;
 }
 
-function warn(string: string) {
+export function warn(string: string) {
     console.warn(chalk.yellow("warn: ") + string);
 }
 
@@ -157,46 +168,57 @@ function projectExistsAt(path: string) {
 }
 
 /**
- * 浠嶴B3鏂囦欢鍙嶇紪璇戝洖jvavscratch椤圭洰
- * @param sb3Path SB3鏂囦欢璺緞
- * @param outputDir 杈撳嚭鐩綍
- * @param projectName 椤圭洰鍚嶇О
+ * Decompile SB3 file back to jvavscratch project
+ * @param sb3Path Path to SB3 file
+ * @param outputDir Output directory
+ * @param projectName Project name
  */
 export async function decompileFromSB3(sb3Path: string, outputDir: string, projectName?: string): Promise<void> {
-    // 验证SB3文件存在性
+    // Validate SB3 file existence
     if (!existsSync(sb3Path)) {
-        console.error(`错误: SB3文件不存在 - ${sb3Path}`);
-        throw new Error('SB3文件不存在');
+        error(`SB3 file does not exist: '${sb3Path}'`);
     }
 
-    // 确定项目名称
+    // Determine project name
     const name = projectName || path.basename(sb3Path, '.sb3');
     const projectDir = join(outputDir, name);
     const tempDir = join(cwd(), 'tmp', `sb3_extract_${Date.now()}`);
 
+    info("Decompiling ", `'${name}'`);
+
     try {
-        // 1. 解压SB3文件
-        console.log('正在解压SB3文件...');
+        // Create temporary directory if it doesn't exist
+        if (!existsSync(join(cwd(), 'tmp'))) {
+            mkdirSync(join(cwd(), 'tmp'), { recursive: true });
+        }
+        if (!existsSync(tempDir)) {
+            mkdirSync(tempDir, { recursive: true });
+        }
+
+        // Step 1: Extract SB3 file
+        info("Extracting ", "SB3 archive");
         await unzipSB3(sb3Path, tempDir);
 
-        // 2. 从解压内容创建jvavscratch项目
-        console.log('正在创建jvavscratch项目结构...');
+        // Step 2: Create jvavscratch project from extracted content
+        info("Creating ", "jvavscratch project structure");
         await createjvavscratchProject(tempDir, projectDir, name);
 
-        // 3. 清理临时文件
-        console.log('正在清理临时文件...');
+        // Step 3: Clean up temporary files
+        info("Cleaning ", "temporary files");
         if (existsSync(tempDir)) {
             rmSync(tempDir, { recursive: true, force: true });
         }
 
-        console.log(`✅ 反编译完成！项目已创建在: ${projectDir}`);
-    } catch (error) {
-        console.error('❌ 反编译过程中发生错误:', error);
-        // 清理临时文件
+        info("Decompiled ", `project '${name}' created at: ${projectDir}`);
+    } catch (err) {
+        warn(`Decompilation failed: ${(err as Error).message}`);
+        
+        // Clean up temporary files on error
         if (existsSync(tempDir)) {
             rmSync(tempDir, { recursive: true, force: true });
         }
-        throw error;
+        
+        error(`Failed to decompile SB3 file: ${(err as Error).message}`);
     }
 }
 
@@ -298,6 +320,10 @@ export function createProject(name: string, at: string) {
     }
 
     if (at != ".") {
+        // Ensure parent directory exists before creating project
+        if (!existsSync(at)) {
+            mkdirSync(at, { recursive: true });
+        }
         new DirectoryBuffer(name).Instantiate(at);
     } else {
         projectPath = cwd();
@@ -365,9 +391,25 @@ export async function updateDep(libFolder: string, bt: string) {
 
     let i = 0;
     for (const v of keys) {
-        if (!existsSync(join(libFolder, v))) {
-            info("Updating ", `package '${v}'`);
-            await addDep({ key: { name: v, version: values[i] } });
+        info("Checking ", `package '${v}'`);
+        let crateInfo = await getCrate(v);
+        if (!crateInfo) {
+            warn(`package '${v}' not found in registry`);
+            i++;
+            continue;
+        }
+
+        let latest = crateInfo.crate.versions.find((ver: any) => ver.yanked === 0);
+        if (!latest) {
+            warn(`no available version for '${v}'`);
+            i++;
+            continue;
+        }
+
+        let currentVersion = values[i] as string;
+        if (currentVersion === "*" || currentVersion !== latest.version) {
+            info("Updating ", `package '${v}' from ${currentVersion} to ${latest.version}`);
+            await addDep({ [v]: { name: v, version: latest.version } });
         }
 
         i++;
@@ -379,8 +421,6 @@ export async function addDep(libraries: { [key: string]: any }) {
         error(`no project cannot be found`);
         return;
     }
-
-    // Removed jvavscratch.toml dependency tracking
 
     if (!projectData.dependencies) {
         projectData.dependencies = {};
@@ -395,62 +435,167 @@ export async function addDep(libraries: { [key: string]: any }) {
     }
 
     let values = Object.values(libraries);
-    await Object.keys(libraries).forEach(async (_, index) => {
+    for (let index = 0; index < values.length; index++) {
         try {
-            let actualValue = values[index];
-            let gitLink = "https://api.github.com/repos/jvavscratch/jvavscratch-registry/contents/" + actualValue.name;
-            let exists = await fetch(gitLink);
+            let actualValue: any = values[index];
+            let crateName = actualValue.name;
+            let version = actualValue.version;
 
-            if (exists.status == 404) {
-                warn(`could not download '${actualValue.name}' since it cannot be found in the jvavscratch registry`);
+            let crateInfo = await getCrate(crateName);
+            if (!crateInfo) {
+                warn(`could not download '${crateName}' since it cannot be found in the jvavscratch registry (${getRegistryUrl()})`);
+                continue;
+            }
+
+            // Resolve latest version if needed
+            if (version === "*") {
+                let latest = crateInfo.crate.versions.find((v: any) => v.yanked === 0);
+                if (!latest) {
+                    warn(`could not download '${crateName}' since there is no available version`);
+                    continue;
+                }
+                version = latest.version;
             } else {
-                if (actualValue.version == "*") {
-                    let latestTest = await fetch(gitLink + "/latest.txt");
-                    if (latestTest.status == 404) {
-                        warn(`could not download '${actualValue.name}' since there is no 'latest' version`);
-                    } else {
-                        let latestVersion = await (await fetch((await latestTest.json() as any).download_url)).text();
-                        let content = (await downloadGit(gitLink))[latestVersion.trim() + "_DIR"];
-                        if (!content) {
-                            warn(`could not download '${actualValue.name}' since there is no 'latest' version`);
-                        } else {
-                            await downloadDep(actualValue.name, content, lib)
-                            projectData.dependencies[actualValue.name] = latestVersion.trim();
-                            writeFileSync(bt, toml.stringify(projectData));
-                        }
-                    }
-                } else {
-                    let content = (await downloadGit(gitLink) as any)[actualValue.version + "_DIR"];
-                    if (!content) {
-                        warn(`could not download '${actualValue.name}' since there is no 'latest' version`);
-                    } else {
-                        await downloadDep(actualValue.name, content, lib)
-                        projectData.dependencies[actualValue.name] = actualValue.version;
-                        writeFileSync(bt, toml.stringify(projectData));
-                    }
+                let targetVersion = crateInfo.crate.versions.find((v: any) => v.version === version && v.yanked === 0);
+                if (!targetVersion) {
+                    warn(`could not download '${crateName}@${version}' since it does not exist or is yanked`);
+                    continue;
                 }
             }
+
+            info("Downloading ", `${crateName}@${version}`);
+            let tarball = await downloadCrate(crateName, version);
+
+            let dest = join(lib, crateName);
+            if (existsSync(dest)) {
+                rmSync(dest, { recursive: true });
+            }
+            mkdirSync(dest, { recursive: true });
+
+            // Extract tarball via temp file
+            let tempTar = join(cwd(), `.tmp_${crateName}_${Date.now()}.tar.gz`);
+            writeFileSync(tempTar, tarball);
+            await tar.x({ file: tempTar, cwd: dest, strip: 1 });
+            rmSync(tempTar);
+
+            projectData.dependencies[crateName] = version;
+            writeFileSync(bt, toml.stringify(projectData));
+            info("Added ", `package '${crateName}@${version}'`);
         } catch (err: any) {
-            error(`an error occured while downloading package '${values[index].name}'; this error most likely will occur because you have sent too many API requests to github. Here is the error: \n\n` + err.message)
+            warn(`an error occurred while downloading package '${(values[index] as any).name}': ${err.message}`);
         }
-    })
+    }
 }
 
 function optimiseTree(program: {[key: string]: Block}): {[key: string]: Block} {
     return treeOptimise(program);
 }
 
-export async function buildProject(argv: {[key: string]: any}, at: string, name: string) {
+export async function searchPackages(query: string) {
+    let result = await searchCrates(query);
+    if (result.crates.length === 0) {
+        info("Search ", `no packages found for '${query}'`);
+        return;
+    }
+
+    info("Search ", `found ${result.meta.total} package(s) for '${query}':\n`);
+    for (const crate of result.crates) {
+        console.log(`  ${crate.name} = "${crate.latest_version || 'no version'}"`);
+        console.log(`    ${crate.description || 'No description'}`);
+        console.log(`    Downloads: ${crate.downloads} | Owner: ${crate.owner}`);
+        console.log();
+    }
+}
+
+export async function publishPackage() {
+    if (!existsSync(bt)) {
+        error("no 'jvavscratch.toml' found in current directory");
+    }
+
+    let config = toml.parse(readFileSync(bt).toString());
+    if (!config.name || !config.version) {
+        error("'jvavscratch.toml' must have 'name' and 'version' fields");
+    }
+
+    let token = getApiToken();
+    if (!token) {
+        error("not logged in. Use 'jvavscratch login' first, or set an API token with 'jvavscratch registry set-token <token>'");
+    }
+
+    let srcDir = join(cwd(), "src");
+    let utilsDir = join(cwd(), "utils");
+    let pkgName = config.name;
+    let pkgVersion = config.version;
+
+    if (!existsSync(srcDir)) {
+        error("could not find 'src' directory");
+    }
+
+    info("Packaging ", `${pkgName}@${pkgVersion}`);
+
+    let tempDir = join(cwd(), `.tmp_publish_${Date.now()}`);
+    mkdirSync(tempDir, { recursive: true });
+
+    // Copy src and utils to temp dir
+    copyAllSync(srcDir, join(tempDir, "src"));
+    if (existsSync(utilsDir)) {
+        copyAllSync(utilsDir, join(tempDir, "utils"));
+    }
+
+    // Read README if exists
+    let readmePath = join(cwd(), "README.md");
+    let readmeContent = '';
+    if (existsSync(readmePath)) {
+        readmeContent = readFileSync(readmePath, 'utf-8');
+    }
+
+    // Create tarball
+    let tarPath = join(cwd(), `.${pkgName}-${pkgVersion}.tar.gz`);
+    await tar.c(
+        {
+            gzip: true,
+            file: tarPath,
+            cwd: tempDir,
+        },
+        ["."]
+    );
+
+    let tarball = readFileSync(tarPath);
+    rmSync(tempDir, { recursive: true });
+
+    info("Publishing ", `${pkgName}@${pkgVersion} to ${getRegistryUrl()}`);
+
+    try {
+        let result = await publishCrate(tarball, {
+            name: String(pkgName),
+            vers: String(pkgVersion),
+            description: String(config.description || ''),
+            readme: readmeContent || undefined,
+            license: config.license ? String(config.license) : undefined,
+            homepage: config.homepage ? String(config.homepage) : undefined,
+            repository: config.repository ? String(config.repository) : undefined,
+            keywords: Array.isArray(config.keywords) ? config.keywords.join(',') : undefined,
+        });
+        rmSync(tarPath);
+        info("Published ", `${pkgName}@${pkgVersion}`);
+        console.log(result.message);
+    } catch (err: any) {
+        rmSync(tarPath);
+        error(`failed to publish: ${err.message}`);
+    }
+}
+
+async function buildProjectInner(argv: {[key: string]: any}, at: string, name: string) {
     let tags: string[] = [];
     let isOptimised = argv.optimize == true;
 
-    if (isOptimised) Warn("Optimization is still in its ALPHA form and may corrupt your project.");
+    if (isOptimised) warn("Optimization is still in its ALPHA form and may corrupt your project.");
 
     info("Building ", name);
 
     tags.push(isOptimised && "[optimized]" || "[unoptimized]")
 
-    let libFolder = join(__dirname, "../util/lib");
+    let libFolder = join(getBuildScratchDir(), "lib");
     deleteAllContents(libFolder);
 
     if (!projectExistsAt(at)) {
@@ -475,19 +620,19 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
 
     // Get libraries
     let lib = path.join(at, "lib");
-    if (!existsSync(src) || !statSync(lib).isDirectory()) {
+    if (!existsSync(lib) || !statSync(lib).isDirectory()) {
         error("could not find `lib` directory; did you remove or forget to add it?");
     }
 
     // Removed dependency tracking
 
-    let broadcastJson = join(__dirname, "../assets/broadcasts.json");
+    let broadcastJson = scratchFile("broadcasts.json");
     writeFileSync(broadcastJson, "[]");
 
-    let fnJson = join(__dirname, "../assets/fn.json");
+    let fnJson = scratchFile("fn.json");
     writeFileSync(fnJson, "{}");
 
-    let classJson = join(__dirname, "../assets/classData.json");
+    let classJson = scratchFile("classData.json");
     writeFileSync(classJson, "{}");
 
     let sprites: string[] = readdirSync(assets);
@@ -506,7 +651,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
         },
 
         globals: [],
-        implements: [],
+        statement_implements: [],
         type_implements: [],
     });;
 
@@ -553,7 +698,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
             },
 
             globals: [],
-            implements: [],
+            statement_implements: [],
             type_implements: [],
         });
 
@@ -565,8 +710,16 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
 
     let srcTree = createFileTree(resolve(src));
 
-    let variableJson = join(__dirname, "../assets/variables.json");
-    let listJson = join(__dirname, "../assets/lists.json");
+    let variableJson = scratchFile("variables.json");
+    let listJson = scratchFile("lists.json");
+
+    let listIndexBase = projectData.list_index_base || 1;
+    if (listIndexBase !== 0 && listIndexBase !== 1) {
+        warn(`Invalid list_index_base '${listIndexBase}', defaulting to 1.`);
+        listIndexBase = 1;
+    }
+
+    let customBlockReturn = projectData.custom_block_return === true;
    
     spriteData.forEach((value: string) => {
 
@@ -607,7 +760,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
             } else {
                 collectedSpriteData[value]["costumes"] = {
                     name: "Costume1",
-                    file: resolve(join(__dirname, "../assets/ice_cream.svg"))
+                    file: resolve(join(__dirname, "../../assets/ice_cream.svg"))
                 }
             }
 
@@ -658,7 +811,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
         } else {
             stageData["costumes"] = {
                 name: "Backdrop1",
-                file: resolve(join(__dirname, "../assets/background.svg"))
+                file: resolve(join(__dirname, "../../assets/background.svg"))
             }
         }
 
@@ -679,7 +832,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
             "costumes": [
                 {
                     name: "Backdrop1",
-                    file: resolve(join(__dirname, "../assets/background.svg"))
+                    file: resolve(join(__dirname, "../../assets/background.svg"))
                 }
             ],
 
@@ -688,7 +841,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
     }
 
     // Project is valid!
-    let tempParentLocation = resolve(join(__dirname, "../tmp"));
+    let tempParentLocation = resolve(join(getBuildScratchDir(), "tmp"));
     let tempLocation = join(tempParentLocation, "temp_project");
 
     deleteAllContents(tempParentLocation); // Just incase; clear it!
@@ -735,7 +888,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
         if (isOptimised) infoList(1, "Optimizing ", spriteName);
         (value.blocks as any[]).forEach((file: string) => {
             let content = readFileSync(file).toString();
-            let program = parseProgram(content, basename(file), true, config).blocks;
+            let program = parseProgram(content, basename(file), true, config, { listIndexBase, customBlockReturn }).blocks;
 
             if (isOptimised) program = optimiseTree(program);
             blocks = {
@@ -860,7 +1013,44 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
     info("Finished ", `${name} ${tags.join(" ")} in ${timeDifference}s`);
 }
 
+/**
+ * 构建入口。
+ *
+ * 每次构建都开一个**独立**的临时目录(而不是原先固定的 `../tmp` 与
+ * `../util/lib`),目录通过 {@link setBuildScratchDir} 告知生成器 ——
+ * 生成器与 CLI 都经 `scratchFile()` 取中间文件(`fn.json`、`classData.json`
+ * 等)。三个问题一并解决:
+ *
+ * 1. 原先写的是**包自身的安装目录**,全局安装或只读挂载会 EACCES,还会污染
+ *    被 npm 装下来的包;
+ * 2. 原先路径固定,并发构建会互相清空对方的中间状态,产出错乱工程;
+ * 3. 拆分后 `generator` 与 `cli` 再无共同的 `../../assets` 可指,路径必失效。
+ *
+ * 包在 `try/finally` 里,构建抛错也会清理干净。
+ */
+export async function buildProject(argv: {[key: string]: any}, at: string, name: string) {
+    let scratchDir = mkdtempSync(join(tmpdir(), "jvavscratch-build-"));
+    setBuildScratchDir(scratchDir);
+
+    try {
+        return await buildProjectInner(argv, at, name);
+    } finally {
+        try {
+            rmSync(scratchDir, { recursive: true, force: true });
+        } catch {
+            // 清理失败不应掩盖真正的构建错误
+        }
+    }
+}
+
 export async function runProject(argv: {[key: string]: any}, at: string, name: string) {
+    if (process.platform !== "win32" && !argv.bypass) {
+        console.error("The `run` command automatically opens TurboWarp, which is only pre-configured for Windows.");
+        console.error(`Your project has been built at: ${join(at, "target", `${name}.sb3`)}`);
+        console.error("Open it manually in TurboWarp, or use --bypass if you have TurboWarp installed elsewhere.");
+        return;
+    }
+
     await buildProject(argv, at, name);
     let target = join(at, "target");
     let compiled = join(target, `${name}.sb3`)
