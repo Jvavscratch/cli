@@ -21,9 +21,10 @@ import { getBuildScratchDir, parseProgram, scratchFile, setBuildScratchDir } fro
 import { tmpdir, userInfo } from "os";
 import { execFileSync } from "child_process";
 import * as toml from "@iarna/toml";
-// 必须从包**主入口**导入,不能写 "@jvavscratch/generator/optimise":
-// 主入口的副作用就是把全部 42 个生成器注册进 core 的派发表,只引子路径
-// 不会执行注册,运行时会因派发表为空而几乎什么都不生成。
+// This must be imported from the package's **main entry**, never from a subpath
+// such as "@jvavscratch/generator/optimise". Importing the main entry is the side
+// effect that registers all 42 generators in core's dispatch tables; a subpath
+// import skips that registration, so empty tables generate almost nothing at runtime.
 import { treeOptimise } from "@jvavscratch/generator"
 // import { Warn } from "@jvavscratch/core"; // Using local warn function instead
 import { unzipSB3, createjvavscratchProject } from "@jvavscratch/decompiler";
@@ -1014,19 +1015,24 @@ async function buildProjectInner(argv: {[key: string]: any}, at: string, name: s
 }
 
 /**
- * 构建入口。
+ * Entry point for a build.
  *
- * 每次构建都开一个**独立**的临时目录(而不是原先固定的 `../tmp` 与
- * `../util/lib`),目录通过 {@link setBuildScratchDir} 告知生成器 ——
- * 生成器与 CLI 都经 `scratchFile()` 取中间文件(`fn.json`、`classData.json`
- * 等)。三个问题一并解决:
+ * Every build gets its **own** temp directory rather than the old fixed
+ * `../tmp` and `../util/lib`, and that directory is handed to the generators
+ * via {@link setBuildScratchDir} — both the generators and the CLI read their
+ * intermediate files (`fn.json`, `classData.json`, and the rest) through
+ * `scratchFile()`. This settles three problems at once:
  *
- * 1. 原先写的是**包自身的安装目录**,全局安装或只读挂载会 EACCES,还会污染
- *    被 npm 装下来的包;
- * 2. 原先路径固定,并发构建会互相清空对方的中间状态,产出错乱工程;
- * 3. 拆分后 `generator` 与 `cli` 再无共同的 `../../assets` 可指,路径必失效。
+ * 1. The old code wrote into the **package's own install directory**, which
+ *    trips EACCES on a global install or a read-only mount and pollutes the
+ *    package as npm installed it;
+ * 2. The old paths were fixed, so concurrent builds would wipe out each
+ *    other's intermediate state and emit garbled projects;
+ * 3. After the split, `generator` and `cli` no longer share a `../../assets`
+ *    to point at, so the old paths were bound to break.
  *
- * 包在 `try/finally` 里,构建抛错也会清理干净。
+ * The scratch directory is managed inside a `try/finally`, so a build that
+ * throws still cleans up after itself.
  */
 export async function buildProject(argv: {[key: string]: any}, at: string, name: string) {
     let scratchDir = mkdtempSync(join(tmpdir(), "jvavscratch-build-"));
@@ -1038,7 +1044,7 @@ export async function buildProject(argv: {[key: string]: any}, at: string, name:
         try {
             rmSync(scratchDir, { recursive: true, force: true });
         } catch {
-            // 清理失败不应掩盖真正的构建错误
+            // A failed cleanup must not mask the real build error
         }
     }
 }

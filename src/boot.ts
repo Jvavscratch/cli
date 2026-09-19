@@ -142,7 +142,7 @@ yargs(hideBin(process.argv))
         },
         handleCommand(async (argv) => {
             if (!argv.sb3Path) {
-                console.error("error: 请提供SB3文件路径");
+                console.error("error: please provide a path to an SB3 file");
                 return;
             }
             await decompileFromSB3(argv.sb3Path, argv.outputDir, argv.projectName);

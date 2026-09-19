@@ -1,3 +1,3 @@
-// 导出cli模块的核心功能
+// Re-export the core functionality of the cli module
 export * from './projectManager';
 export * from './treeScan';

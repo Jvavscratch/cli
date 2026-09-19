@@ -1,13 +1,13 @@
-# 依赖
+# Dependencies
 node_modules/
 
-# 编译产物
+# Build output
 dist/
 *.tsbuildinfo
 
-# 测试覆盖率
+# Test coverage
 coverage/
 
-# 杂项
+# Misc
 *.log
 .DS_Store
